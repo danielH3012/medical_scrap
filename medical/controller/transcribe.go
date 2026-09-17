@@ -13,6 +13,7 @@ import (
 
 	"encoding/json"
 	"log"
+	"strconv"
 
 	goaipackage "github.com/danielH3012/go_ai_package"
 	"github.com/google/uuid"
@@ -137,12 +138,10 @@ func (c *SpeechController) HandleTranscribe(w http.ResponseWriter, r *http.Reque
 		4. Jika ada label pembicara (mis. "Dokter:", "Pasien:") di transkrip, gunakan sebagai petunjuk tambahan saja — isi kalimat yang menentukan label, bukan siapa yang bicara.
 		5. Keluarkan HANYA satu objek JSON valid, tanpa teks tambahan, tanpa markdown code fence, dengan skema persis:
 		{
-  		  "answer": [
-    		{"text": "<kalimat asli>", "label": "S"},
-    		{"text": "<kalimat asli>", "label": "O"}
-  		  ]
+    		"<kalimat asli 1>": "S",
+    		"<kalimat asli 2>": "O"
 		}
-		6. Jika transkrip sama sekali tidak memuat kalimat relevan SOAP, kembalikan "answer": [] (array kosong).
+		6. Jika transkrip sama sekali tidak memuat kalimat relevan SOAP, kembalikan {} (objek kosong).
 		
 		Aturan disambiguasi S vs O:
 		1. Pertanyaan dokter yang MENGGALI riwayat/gejala/keluhan pasien (anamnesis) → label S, walaupun yang bicara adalah dokter. Contoh: "Ada demam?", "Riwayat alergi obat?", "Sedang minum obat rutin lain?"
@@ -157,17 +156,91 @@ func (c *SpeechController) HandleTranscribe(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var parsed struct {
-		Answer string `json:"answer"`
-	}
-	if err := json.Unmarshal([]byte(respJSON), &parsed); err != nil || parsed.Answer == "" {
-		parsed.Answer = respJSON
+	answerMap := cleanAndExtractSOAP(respJSON)
+	if len(answerMap) == 0 {
+		log.Printf("[/api/transcribe AI Warning] Hasil ekstraksi kosong, raw: %s", respJSON)
 	}
 
 	respData := map[string]any{
-		"answer": parsed.Answer,
+		"answer": answerMap,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(respData)
+	respBytes, err := json.MarshalIndent(respData, "", "  ")
+	if err != nil {
+		http.Error(w, "Gagal meng-encode response JSON: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(respBytes)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(respBytes)
+}
+
+func cleanAndExtractSOAP(raw string) map[string]string {
+	result := make(map[string]string)
+	current := strings.TrimSpace(raw)
+
+	for iter := 0; iter < 5; iter++ {
+		startIdx := strings.Index(current, "{")
+		endIdx := strings.LastIndex(current, "}")
+		if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+			current = current[startIdx : endIdx+1]
+		}
+
+		var genericMap map[string]any
+		if err := json.Unmarshal([]byte(current), &genericMap); err != nil || len(genericMap) == 0 {
+			var list []map[string]any
+			if errArr := json.Unmarshal([]byte(current), &list); errArr == nil && len(list) > 0 {
+				for _, item := range list {
+					for k, v := range item {
+						if s, ok := v.(string); ok {
+							result[k] = s
+						}
+					}
+				}
+			}
+			break
+		}
+
+		if val, exists := genericMap["answer"]; exists && len(genericMap) == 1 {
+			if strVal, ok := val.(string); ok {
+				current = strings.TrimSpace(strVal)
+				continue
+			}
+			if subMap, ok := val.(map[string]any); ok {
+				genericMap = subMap
+			}
+		}
+
+		for k, v := range genericMap {
+			if k == "answer" {
+				if subMap, ok := v.(map[string]any); ok {
+					for subK, subV := range subMap {
+						if s, ok := subV.(string); ok {
+							result[subK] = s
+						}
+					}
+					continue
+				} else if strVal, ok := v.(string); ok {
+					var innerMap map[string]string
+					if errInner := json.Unmarshal([]byte(strVal), &innerMap); errInner == nil {
+						for subK, subV := range innerMap {
+							result[subK] = subV
+						}
+						continue
+					}
+				}
+			}
+			if s, ok := v.(string); ok {
+				result[k] = s
+			}
+		}
+
+		if len(result) > 0 {
+			break
+		}
+	}
+
+	return result
 }
