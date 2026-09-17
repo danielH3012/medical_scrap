@@ -1,0 +1,27 @@
+# Environment Variables
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+
+# Go build & temp files
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+tmp/
+/medical/tmp/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
