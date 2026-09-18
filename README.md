@@ -196,9 +196,9 @@ psql -U postgres -d medical -f db.sql
    ```env
    DB_HOST=localhost
    DB_PORT=5432
-   DB_USER=postgres
-   DB_PASSWORD=postgres
-   DB_NAME=medical
+   DB_USER=your_db_username
+   DB_PASSWORD=your_db_password
+   DB_NAME=your_db_name
    DB_SSLMODE=disable
 
    STT_API_KEY=your_elevenlabs_api_key

@@ -114,9 +114,6 @@ func (c *SpeechController) HandleTranscribe(w http.ResponseWriter, r *http.Reque
 	if reqModel := strings.TrimSpace(r.FormValue("model")); reqModel != "" {
 		cfg.STT_MODEL = reqModel
 	}
-	if reqLang := strings.TrimSpace(r.FormValue("language")); reqLang != "" {
-		cfg.STT_LANGUAGE = textandspeech.NormalizeSTTLanguage(reqLang)
-	}
 
 	log.Printf("[/api/transcribe] Processing STT — file: %s, size: %d bytes, model: %s, lang: %s", header.Filename, header.Size, cfg.STT_MODEL, cfg.STT_LANGUAGE)
 	transcription, err := textandspeech.Transcribe(cfg, tempAudioPath)
