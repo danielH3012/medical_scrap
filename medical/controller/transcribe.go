@@ -39,6 +39,27 @@ func (c *SpeechController) getSTTConfig() textandspeech.STTConfig {
 	}
 }
 
+type PrescriptionItem struct {
+	Drug   string `json:"drug"`
+	Dosage string `json:"dosage"`
+	Qty    any    `json:"qty"`
+}
+
+type SOAPDraft struct {
+	Subjective string `json:"subjective"`
+	Objective  string `json:"objective"`
+	Assessment string `json:"assessment"`
+	Plan       string `json:"plan"`
+}
+
+type FullDraft struct {
+	Subjective   string             `json:"subjective"`
+	Objective    string             `json:"objective"`
+	Assessment   string             `json:"assessment"`
+	Plan         string             `json:"plan"`
+	Prescription []PrescriptionItem `json:"prescription"`
+}
+
 func (c *SpeechController) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "*")
@@ -118,51 +139,59 @@ func (c *SpeechController) HandleTranscribe(w http.ResponseWriter, r *http.Reque
 
 	goaipackage.SetAIConfig(os.Getenv("AI_KEY"), os.Getenv("BASE_AI_URL"))
 
-	respPrompt := fmt.Sprintf(
-		`Anda adalah asisten pencatatan medis. Tugas Anda: baca transkrip konsultasi dokter-pasien, pecah menjadi kalimat/klausa berurutan sesuai kemunculannya di transkrip, lalu beri label SOAP pada setiap kalimat.
-		Definisi label:
-			- "S" (subjective): keluhan, gejala, atau riwayat yang disampaikan PASIEN dengan kata-katanya sendiri, termasuk saat dikutip ulang oleh dokter (mis. "pasien mengatakan...").
-  			  Contoh: "Saya merasa nyeri di dada sejak kemarin malam."
-			- "O" (objective): temuan yang diukur/diamati langsung oleh tenaga medis — tanda vital, hasil pemeriksaan fisik, hasil lab/pencitraan.
-  			  Contoh: "Tekanan darah 140/90 mmHg, suhu 37.8°C."
-			- "A" (assessment): interpretasi klinis atau diagnosis yang disimpulkan dokter dari data subjective dan objective.
-  			  Contoh: "Kemungkinan besar gastritis akut."
-			- "P" (plan): tindakan, terapi, obat, dosis, rujukan, atau instruksi tindak lanjut.
-  			  Contoh: "Berikan omeprazole 20mg 2x sehari selama 5 hari."
-			- "N" (none): basa-basi, salam, atau kalimat tanpa informasi medis relevan.
+	respPrompt :=
+		`Anda adalah asisten pencatatan medis (clinical scribe) profesional.
+	Tugas Anda: Analisis transkrip konsultasi dokter-pasien, lalu rangkum menjadi catatan rekam medis SOAP (Subjective, Objective, Assessment, Plan) serta ekstrak LANGSUNG dari percakapan seluruh daftar resep obat (prescription) yang diberikan dokter.
 
-		Aturan:
-		1. JANGAN mengelompokkan ulang kalimat berdasarkan kategori. Pertahankan urutan kemunculan PERSIS seperti di transkrip asli — urutan label akhir boleh acak (mis. S,O,S,A,O,P), tidak harus S,O,A,P berurutan.
-		2. Kutip kalimat APA ADANYA (verbatim) — jangan meringkas, menerjemahkan, atau menulis ulang.
-		3. Setiap kalimat mendapat TEPAT SATU label. Jika satu kalimat memuat lebih dari satu jenis informasi, pilih yang paling dominan.
-		4. Jika ada label pembicara (mis. "Dokter:", "Pasien:") di transkrip, gunakan sebagai petunjuk tambahan saja — isi kalimat yang menentukan label, bukan siapa yang bicara.
-		5. Keluarkan HANYA satu objek JSON valid, tanpa teks tambahan, tanpa markdown code fence, dengan skema persis:
-		{
-    		"<kalimat asli 1>": "S",
-    		"<kalimat asli 2>": "O"
-		}
-		6. Jika transkrip sama sekali tidak memuat kalimat relevan SOAP, kembalikan {} (objek kosong).
-		
-		Aturan disambiguasi S vs O:
-		1. Pertanyaan dokter yang MENGGALI riwayat/gejala/keluhan pasien (anamnesis) → label S, walaupun yang bicara adalah dokter. Contoh: "Ada demam?", "Riwayat alergi obat?", "Sedang minum obat rutin lain?"
+	Definisi dan aturan per kategori:
+	1. "subjective": Rangkum keluhan utama, riwayat penyakit sekarang, durasi/onset gejala, riwayat alergi, atau riwayat pengobatan yang disampaikan pasien atau keluarganya.
+	2. "objective": Rangkum temuan pemeriksaan fisik, tanda-tanda vital, dan observasi langsung oleh dokter saat pemeriksaan.
+	3. "assessment": Tuliskan diagnosis klinis dokter.
+	4. "plan": Rangkum rencana tindakan non-obat, edukasi hidrasi/istirahat, dan anjuran kontrol kembali.
+	5. "prescription": Ekstrak LANGSUNG dari ucapan dokter seluruh obat yang diresepkan/diberikan kepada pasien:
+	   - Sertakan obat yang disebut namanya secara spesifik (misal: "Azitromisin 500mg").
+	   - Sertakan juga obat yang disebutkan fungsinya oleh dokter (misal: jika dokter menyebut "obat pereda demam dan nyeri" -> ekstrak Paracetamol / obat pereda demam dan nyeri, jika dokter menyebut "dekongestan" -> ekstrak Dekongestan).
+	   - "dosage": cara konsumsi atau frekuensi yang diinstruksikan dokter (contoh: "1x sehari selama 3 hari", "3x sehari", atau "-" jika tidak dirinci).
+	   - "qty": jumlah obat yang diberikan (contoh: 3, 10, atau "-" jika tidak dirinci).
+	   - Jika dokter tidak memberikan resep obat sama sekali, berikan array kosong [].
 
-		2. Data vital/fisik hanya berlabel O jika DIUKUR LANGSUNG oleh  dokter saat konsultasi berlangsung (TTV, inspeksi, auskultasi, perkusi, palpasi). Jika angka yang sama dilaporkan pasien dari pengukuran sebelumnya (di rumah, kemarin, dsb) → tetap S. Contoh: "Suhu saya 38.5 kemarin malam" (pasien lapor) = S "Suhu 38.1 derajat" (dokter ukur saat ini) = O
-
-		3. Kalimat transisi/basa-basi dokter tanpa muatan klinis (sapaan, "saya periksa dulu ya", "silakan duduk") → N.`)
-	query := fmt.Sprint("bagi perkalimat, apakah itu subjective, objective, assessment, atau plan (SOAP) atau bukan, dari transkrip yang diberikan")
+	Format Output:
+	Keluarkan HANYA satu objek JSON valid, tanpa teks penjelasan tambahan, tanpa markdown code fence, dengan skema persis:
+	{
+		"subjective": "...",
+		"objective": "...",
+		"assessment": "...",
+		"plan": "...",
+		"prescription": [
+			{
+				"drug": "...",
+				"dosage": "...",
+				"qty": 10
+			}
+		]
+	}`
+	query := "Ekstrak catatan medis SOAP dan daftar resep (prescription) langsung dari percakapan dokter-pasien berikut."
 	respJSON, err := goaipackage.GenerateResponse(r.Context(), query, finalText, nil, os.Getenv("AI_MODEL"), goaipackage.WithResponsePrompt(respPrompt))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	answerMap := cleanAndExtractSOAP(respJSON)
-	if len(answerMap) == 0 {
-		log.Printf("[/api/transcribe AI Warning] Hasil ekstraksi kosong, raw: %s", respJSON)
+	fullDraft := cleanAndExtractDraft(respJSON)
+	if fullDraft.Subjective == "" && fullDraft.Objective == "" && fullDraft.Assessment == "" && fullDraft.Plan == "" && len(fullDraft.Prescription) == 0 {
+		log.Printf("[/api/transcribe AI Warning] Hasil ekstraksi SOAP kosong, raw: %s", respJSON)
+	}
+
+	soapOnly := SOAPDraft{
+		Subjective: fullDraft.Subjective,
+		Objective:  fullDraft.Objective,
+		Assessment: fullDraft.Assessment,
+		Plan:       fullDraft.Plan,
 	}
 
 	respData := map[string]any{
-		"answer": answerMap,
+		"soap":         soapOnly,
+		"prescription": fullDraft.Prescription,
 	}
 
 	respBytes, err := json.MarshalIndent(respData, "", "  ")
@@ -177,70 +206,79 @@ func (c *SpeechController) HandleTranscribe(w http.ResponseWriter, r *http.Reque
 	_, _ = w.Write(respBytes)
 }
 
-func cleanAndExtractSOAP(raw string) map[string]string {
-	result := make(map[string]string)
+func cleanAndExtractDraft(raw string) *FullDraft {
 	current := strings.TrimSpace(raw)
 
 	for iter := 0; iter < 5; iter++ {
+		current = strings.TrimSpace(current)
+
+		// Strip markdown code fence: ```json ... ```
+		if strings.HasPrefix(current, "```") {
+			lines := strings.Split(current, "\n")
+			if len(lines) >= 2 {
+				lines = lines[1:]
+				if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "```") {
+					lines = lines[:len(lines)-1]
+				}
+				current = strings.TrimSpace(strings.Join(lines, "\n"))
+			}
+		}
+
+		// Find outermost { and }
 		startIdx := strings.Index(current, "{")
 		endIdx := strings.LastIndex(current, "}")
 		if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
 			current = current[startIdx : endIdx+1]
 		}
 
+		// Try direct unmarshal
+		var draft FullDraft
+		if err := json.Unmarshal([]byte(current), &draft); err == nil {
+			if draft.Subjective != "" || draft.Objective != "" || draft.Assessment != "" || draft.Plan != "" || len(draft.Prescription) > 0 {
+				if draft.Prescription == nil {
+					draft.Prescription = []PrescriptionItem{}
+				}
+				return &draft
+			}
+		}
+
+		// Try unmarshaling into generic map to check wrappers like {"answer": ...} or {"soap": ...}
 		var genericMap map[string]any
-		if err := json.Unmarshal([]byte(current), &genericMap); err != nil || len(genericMap) == 0 {
-			var list []map[string]any
-			if errArr := json.Unmarshal([]byte(current), &list); errArr == nil && len(list) > 0 {
-				for _, item := range list {
-					for k, v := range item {
-						if s, ok := v.(string); ok {
-							result[k] = s
+		if err := json.Unmarshal([]byte(current), &genericMap); err == nil && len(genericMap) > 0 {
+			unwrapped := false
+			for _, key := range []string{"answer", "soap", "data"} {
+				if val, exists := genericMap[key]; exists {
+					if strVal, ok := val.(string); ok {
+						current = strings.TrimSpace(strVal)
+						unwrapped = true
+						break
+					}
+					if subMap, ok := val.(map[string]any); ok {
+						subBytes, _ := json.Marshal(subMap)
+						var subDraft FullDraft
+						if errSub := json.Unmarshal(subBytes, &subDraft); errSub == nil {
+							if subDraft.Subjective != "" || subDraft.Objective != "" || subDraft.Assessment != "" || subDraft.Plan != "" || len(subDraft.Prescription) > 0 {
+								if subDraft.Prescription == nil {
+									subDraft.Prescription = []PrescriptionItem{}
+								}
+								return &subDraft
+							}
 						}
 					}
 				}
 			}
-			break
-		}
-
-		if val, exists := genericMap["answer"]; exists && len(genericMap) == 1 {
-			if strVal, ok := val.(string); ok {
-				current = strings.TrimSpace(strVal)
+			if unwrapped {
 				continue
 			}
-			if subMap, ok := val.(map[string]any); ok {
-				genericMap = subMap
-			}
 		}
 
-		for k, v := range genericMap {
-			if k == "answer" {
-				if subMap, ok := v.(map[string]any); ok {
-					for subK, subV := range subMap {
-						if s, ok := subV.(string); ok {
-							result[subK] = s
-						}
-					}
-					continue
-				} else if strVal, ok := v.(string); ok {
-					var innerMap map[string]string
-					if errInner := json.Unmarshal([]byte(strVal), &innerMap); errInner == nil {
-						for subK, subV := range innerMap {
-							result[subK] = subV
-						}
-						continue
-					}
-				}
-			}
-			if s, ok := v.(string); ok {
-				result[k] = s
-			}
-		}
-
-		if len(result) > 0 {
-			break
-		}
+		break
 	}
 
-	return result
+	var fallback FullDraft
+	_ = json.Unmarshal([]byte(current), &fallback)
+	if fallback.Prescription == nil {
+		fallback.Prescription = []PrescriptionItem{}
+	}
+	return &fallback
 }
